@@ -1,22 +1,20 @@
 #pragma once
 
-#include <ll/api/mod/NativeMod.h>
 #include <ll/api/Config.h>
+#include <ll/api/mod/NativeMod.h>
 
 namespace goal_optimizer {
 
 struct Config {
-    int version = 1;
-    bool enabled = true;
-    bool debug = false;
-
-    // 分帧相位数（1 = 不分帧，4 = 每实体每 4 tick 评估一次）
-    int phaseCount = 4;
+    int  version    = 1;
+    bool enabled    = true;
+    bool debug      = false;
+    int  phaseCount = 4;
 };
 
 Config& getConfig();
-bool loadConfig();
-bool saveConfig();
+bool    loadConfig();
+bool    saveConfig();
 
 class GoalOptimizer {
 public:
