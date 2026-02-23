@@ -106,7 +106,6 @@ LL_STATIC_HOOK(
         return;
     }
 
-    // mActor 解引用得到 Actor&
     Actor& actor = *actorOwnerComponent.mActor;
 
     if (actor.isPlayer()) {
@@ -123,6 +122,7 @@ LL_STATIC_HOOK(
         currentPhase = static_cast<int>(currentTick % config.phaseCount);
     }
 
+    // rawID is int64_t; reinterpret as uint64_t so modulo works correctly for negative IDs
     uint64_t uId         = static_cast<uint64_t>(actor.getOrCreateUniqueID().rawID);
     int      entityPhase = static_cast<int>(uId % config.phaseCount);
 
