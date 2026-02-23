@@ -5,6 +5,7 @@
 #include <filesystem>
 
 #include <ll/api/chrono/GameChrono.h>
+#include <ll/api/config/Config.h>
 #include <ll/api/coro/CoroTask.h>
 #include <ll/api/io/Logger.h>
 #include <ll/api/io/LoggerRegistry.h>
@@ -122,7 +123,6 @@ LL_STATIC_HOOK(
         currentPhase = static_cast<int>(currentTick % config.phaseCount);
     }
 
-    // rawID is int64_t; reinterpret as uint64_t so modulo works correctly for negative IDs
     uint64_t uId         = static_cast<uint64_t>(actor.getOrCreateUniqueID().rawID);
     int      entityPhase = static_cast<int>(uId % config.phaseCount);
 
