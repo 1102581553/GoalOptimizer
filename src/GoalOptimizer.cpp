@@ -1,35 +1,42 @@
 #include "GoalOptimizer.h"
+
+#include <atomic>
+#include <cstdint>
+#include <filesystem>
+
+#include <ll/api/chrono/GameChrono.h>
+#include <ll/api/coro/CoroTask.h>
+#include <ll/api/io/Logger.h>
+#include <ll/api/io/LoggerRegistry.h>
 #include <ll/api/memory/Hook.h>
 #include <ll/api/mod/RegisterHelper.h>
 #include <ll/api/service/Bedrock.h>
-#include <ll/api/io/Logger.h>
-#include <ll/api/io/LoggerRegistry.h>
-#include <ll/api/chrono/GameChrono.h>
-#include <ll/api/coro/CoroTask.h>
 #include <ll/api/thread/ServerThreadExecutor.h>
-#include <mc/world/actor/Actor.h>
-#include <mc/world/actor/player/Player.h>
-#include <mc/world/level/Level.h>
+
 #include <mc/entity/components/ActorOwnerComponent.h>
 #include <mc/entity/systems/GoalSelectorSystem.h>
 #include <mc/legacy/ActorUniqueID.h>
-#include <filesystem>
-#include <cstdint>
-#include <cstdlib>
+#include <mc/world/actor/Actor.h>
+#include <mc/world/actor/player/Player.h>
+#include <mc/world/level/Level.h>
+#include <mc/world/level/Tick.h>
+
+// 压掉 "API not available" 的 C4996 警告
+#pragma warning(push)
+#pragma warning(disable : 4996)
 
 namespace goal_optimizer {
 
-static Config config;
+static Config                          config;
 static std::shared_ptr<ll::io::Logger> log;
-static bool hookInstalled = false;
-static bool debugTaskRunning = false;
+static bool                            hookInstalled    = false;
+static std::atomic<bool>               debugTaskRunning = false;
 
-static uint64_t lastTickId = 0;
-static int currentPhase = 0;
+static uint64_t lastTickId   = 0;
+static int      currentPhase = 0;
 
-// 调试统计
 static size_t totalProcessed = 0;
-static size_t totalSkipped = 0;
+static size_t totalSkipped   = 0;
 
 static ll::io::Logger& getLogger() {
     if (!log) {
@@ -41,7 +48,7 @@ static ll::io::Logger& getLogger() {
 Config& getConfig() { return config; }
 
 bool loadConfig() {
-    auto path = GoalOptimizer::getInstance().getSelf().getConfigDir() / "config.json";
+    auto path   = GoalOptimizer::getInstance().getSelf().getConfigDir() / "config.json";
     bool loaded = ll::config::loadConfig(config, path);
     if (config.phaseCount < 1) config.phaseCount = 1;
     return loaded;
@@ -53,34 +60,34 @@ bool saveConfig() {
 }
 
 static void resetStats() {
-    totalProcessed = totalSkipped = 0;
+    totalProcessed = 0;
+    totalSkipped   = 0;
 }
 
 static void startDebugTask() {
-    if (debugTaskRunning) return;
-    debugTaskRunning = true;
+    if (debugTaskRunning.exchange(true)) return;
 
     ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
-        while (debugTaskRunning) {
+        while (debugTaskRunning.load()) {
             co_await std::chrono::seconds(5);
             ll::thread::ServerThreadExecutor::getDefault().execute([] {
                 if (!config.debug) return;
-                size_t total = totalProcessed + totalSkipped;
+                size_t total    = totalProcessed + totalSkipped;
                 double skipRate = total > 0 ? (100.0 * totalSkipped / total) : 0.0;
                 getLogger().info(
                     "Goal stats (5s): processed={}, skipped={}, skipRate={:.1f}%, phaseCount={}",
-                    totalProcessed, totalSkipped, skipRate, config.phaseCount
+                    totalProcessed,
+                    totalSkipped,
+                    skipRate,
+                    config.phaseCount
                 );
                 resetStats();
             });
         }
-        debugTaskRunning = false;
     }).launch(ll::thread::ServerThreadExecutor::getDefault());
 }
 
-static void stopDebugTask() {
-    debugTaskRunning = false;
-}
+static void stopDebugTask() { debugTaskRunning.store(false); }
 
 } // namespace goal_optimizer
 
@@ -100,7 +107,8 @@ LL_STATIC_HOOK(
         return;
     }
 
-    Actor* actor = actorOwnerComponent.getActor();
+    // ActorOwnerComponent::mActor 是 OwnerPtr<EntityContext>
+    Actor* actor = Actor::tryGetFromEntity(*actorOwnerComponent.mActor, false);
     if (!actor) {
         origin(actorOwnerComponent);
         return;
@@ -113,23 +121,18 @@ LL_STATIC_HOOK(
         return;
     }
 
-    auto* level = actor->getLevel();
-    if (!level) {
-        origin(actorOwnerComponent);
-        return;
-    }
-
-    uint64_t currentTick = level->getCurrentTick().tickID;
+    auto&    level       = actor->getLevel();
+    uint64_t currentTick = level.getCurrentTick().tickID;
 
     // 新 tick：更新相位
     if (currentTick != lastTickId) {
-        lastTickId = currentTick;
+        lastTickId   = currentTick;
         currentPhase = static_cast<int>(currentTick % config.phaseCount);
     }
 
-    // 实体 ID 取模分相
-    int64_t rawId = actor->getOrCreateUniqueID().rawID;
-    int entityPhase = static_cast<int>(std::abs(rawId) % config.phaseCount);
+    // 无符号取模避免 abs(INT64_MIN) 的 UB
+    uint64_t uId         = static_cast<uint64_t>(actor->getOrCreateUniqueID().rawID);
+    int      entityPhase = static_cast<int>(uId % config.phaseCount);
 
     if (entityPhase != currentPhase) {
         ++totalSkipped;
@@ -140,7 +143,10 @@ LL_STATIC_HOOK(
     ++totalProcessed;
 }
 
+#pragma warning(pop)
+
 // ====================== 生命周期 ======================
+
 namespace goal_optimizer {
 
 GoalOptimizer& GoalOptimizer::getInstance() {
@@ -154,8 +160,12 @@ bool GoalOptimizer::load() {
         getLogger().warn("Failed to load config, using defaults and saving");
         saveConfig();
     }
-    getLogger().info("GoalOptimizer loaded. enabled: {}, debug: {}, phaseCount: {}",
-                     config.enabled, config.debug, config.phaseCount);
+    getLogger().info(
+        "GoalOptimizer loaded. enabled: {}, debug: {}, phaseCount: {}",
+        config.enabled,
+        config.debug,
+        config.phaseCount
+    );
     return true;
 }
 
@@ -174,8 +184,8 @@ bool GoalOptimizer::disable() {
     if (hookInstalled) {
         GoalSelectorTickHook::unhook();
         hookInstalled = false;
-        lastTickId = 0;
-        currentPhase = 0;
+        lastTickId    = 0;
+        currentPhase  = 0;
         resetStats();
     }
     getLogger().info("GoalOptimizer disabled");
