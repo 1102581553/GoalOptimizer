@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ll/api/config/Config.h>
+#include <ll/api/Config.h>
 #include <ll/api/mod/NativeMod.h>
 
 namespace goal_optimizer {
