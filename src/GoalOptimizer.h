@@ -1,6 +1,5 @@
 #pragma once
 
-#include <ll/api/Config.h>
 #include <ll/api/mod/NativeMod.h>
 
 namespace goal_optimizer {
@@ -30,8 +29,6 @@ public:
     bool enable();
     bool disable();
 
-private:
-    friend void ::ll::registerMod(auto&&, auto&&);
     ll::mod::NativeMod* mSelf = nullptr;
 };
 
