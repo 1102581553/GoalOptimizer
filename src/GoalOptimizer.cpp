@@ -21,7 +21,6 @@
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 
-// 压掉 "API not available" 的 C4996 警告
 #pragma warning(push)
 #pragma warning(disable : 4996)
 
@@ -107,31 +106,24 @@ LL_STATIC_HOOK(
         return;
     }
 
-    // ActorOwnerComponent::mActor 是 OwnerPtr<EntityContext>
-    Actor* actor = Actor::tryGetFromEntity(*actorOwnerComponent.mActor, false);
-    if (!actor) {
-        origin(actorOwnerComponent);
-        return;
-    }
+    // mActor 解引用得到 Actor&
+    Actor& actor = *actorOwnerComponent.mActor;
 
-    // 玩家永远不跳过
-    if (actor->isPlayer()) {
+    if (actor.isPlayer()) {
         origin(actorOwnerComponent);
         ++totalProcessed;
         return;
     }
 
-    auto&    level       = actor->getLevel();
+    auto&    level       = actor.getLevel();
     uint64_t currentTick = level.getCurrentTick().tickID;
 
-    // 新 tick：更新相位
     if (currentTick != lastTickId) {
         lastTickId   = currentTick;
         currentPhase = static_cast<int>(currentTick % config.phaseCount);
     }
 
-    // 无符号取模避免 abs(INT64_MIN) 的 UB
-    uint64_t uId         = static_cast<uint64_t>(actor->getOrCreateUniqueID().rawID);
+    uint64_t uId         = static_cast<uint64_t>(actor.getOrCreateUniqueID().rawID);
     int      entityPhase = static_cast<int>(uId % config.phaseCount);
 
     if (entityPhase != currentPhase) {
