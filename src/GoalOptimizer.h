@@ -1,35 +1,185 @@
-#pragma once
+#include "GoalOptimizer.h"
 
-#include <ll/api/Config.h>
-#include <ll/api/mod/NativeMod.h>
+#include <atomic>
+#include <cstdint>
+#include <filesystem>
+
+#include <ll/api/chrono/GameChrono.h>
+#include <ll/api/coro/CoroTask.h>
+#include <ll/api/io/Logger.h>
+#include <ll/api/io/LoggerRegistry.h>
+#include <ll/api/memory/Hook.h>
+#include <ll/api/mod/RegisterHelper.h>
+#include <ll/api/service/Bedrock.h>
+#include <ll/api/thread/ServerThreadExecutor.h>
+
+#include <mc/legacy/ActorUniqueID.h>
+#include <mc/world/actor/Actor.h>
+#include <mc/world/actor/Mob.h>
+#include <mc/world/actor/player/Player.h>
+#include <mc/world/level/Level.h>
+#include <mc/world/level/Tick.h>
+
+#pragma warning(push)
+#pragma warning(disable : 4996)
 
 namespace goal_optimizer {
 
-struct Config {
-    int  version    = 1;
-    bool enabled    = true;
-    bool debug      = false;
-    int  phaseCount = 4;
-};
+static Config                          config;
+static std::shared_ptr<ll::io::Logger> log;
+static bool                            hookInstalled    = false;
+static std::atomic<bool>               debugTaskRunning = false;
 
-Config& getConfig();
-bool    loadConfig();
-bool    saveConfig();
+static uint64_t lastTickId   = 0;
+static int      currentPhase = 0;
 
-class GoalOptimizer {
-public:
-    static GoalOptimizer& getInstance();
+static size_t totalProcessed = 0;
+static size_t totalSkipped   = 0;
 
-    GoalOptimizer() : mSelf(*ll::mod::NativeMod::current()) {}
+static ll::io::Logger& getLogger() {
+    if (!log) {
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("GoalOptimizer");
+    }
+    return *log;
+}
 
-    [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
+Config& getConfig() { return config; }
 
-    bool load();
-    bool enable();
-    bool disable();
+bool loadConfig() {
+    auto path   = GoalOptimizer::getInstance().getSelf().getConfigDir() / "config.json";
+    bool loaded = ll::config::loadConfig(config, path);
+    if (config.phaseCount < 1) config.phaseCount = 1;
+    return loaded;
+}
 
-private:
-    ll::mod::NativeMod& mSelf;
-};
+bool saveConfig() {
+    auto path = GoalOptimizer::getInstance().getSelf().getConfigDir() / "config.json";
+    return ll::config::saveConfig(config, path);
+}
+
+static void resetStats() {
+    totalProcessed = 0;
+    totalSkipped   = 0;
+}
+
+static void startDebugTask() {
+    if (debugTaskRunning.exchange(true)) return;
+
+    ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
+        while (debugTaskRunning.load()) {
+            co_await std::chrono::seconds(5);
+            ll::thread::ServerThreadExecutor::getDefault().execute([] {
+                if (!config.debug) return;
+                size_t total    = totalProcessed + totalSkipped;
+                double skipRate = total > 0 ? (100.0 * totalSkipped / total) : 0.0;
+                getLogger().info(
+                    "Goal stats (5s): processed={}, skipped={}, skipRate={:.1f}%, phaseCount={}",
+                    totalProcessed,
+                    totalSkipped,
+                    skipRate,
+                    config.phaseCount
+                );
+                resetStats();
+            });
+        }
+    }).launch(ll::thread::ServerThreadExecutor::getDefault());
+}
+
+static void stopDebugTask() { debugTaskRunning.store(false); }
 
 } // namespace goal_optimizer
+
+// ====================== Hook ======================
+
+LL_TYPE_INSTANCE_HOOK(
+    MobTickAiHook,
+    ll::memory::HookPriority::Normal,
+    Mob,
+    &Mob::tickAi,
+    void
+) {
+    using namespace goal_optimizer;
+
+    if (!config.enabled) {
+        origin();
+        return;
+    }
+
+    if (this->isPlayer()) {
+        origin();
+        ++totalProcessed;
+        return;
+    }
+
+    auto&    level       = this->getLevel();
+    uint64_t currentTick = level.getCurrentTick().tickID;
+
+    if (currentTick != lastTickId) {
+        lastTickId   = currentTick;
+        currentPhase = static_cast<int>(currentTick % config.phaseCount);
+    }
+
+    uint64_t uId         = static_cast<uint64_t>(this->getOrCreateUniqueID().rawID);
+    int      entityPhase = static_cast<int>(uId % config.phaseCount);
+
+    if (entityPhase != currentPhase) {
+        ++totalSkipped;
+        return;
+    }
+
+    origin();
+    ++totalProcessed;
+}
+
+#pragma warning(pop)
+
+// ====================== 生命周期 ======================
+
+namespace goal_optimizer {
+
+GoalOptimizer& GoalOptimizer::getInstance() {
+    static GoalOptimizer instance;
+    return instance;
+}
+
+bool GoalOptimizer::load() {
+    std::filesystem::create_directories(getSelf().getConfigDir());
+    if (!loadConfig()) {
+        getLogger().warn("Failed to load config, using defaults and saving");
+        saveConfig();
+    }
+    getLogger().info(
+        "GoalOptimizer loaded. enabled: {}, debug: {}, phaseCount: {}",
+        config.enabled,
+        config.debug,
+        config.phaseCount
+    );
+    return true;
+}
+
+bool GoalOptimizer::enable() {
+    if (!hookInstalled) {
+        MobTickAiHook::hook();
+        hookInstalled = true;
+    }
+    if (config.debug) startDebugTask();
+    getLogger().info("GoalOptimizer enabled");
+    return true;
+}
+
+bool GoalOptimizer::disable() {
+    stopDebugTask();
+    if (hookInstalled) {
+        MobTickAiHook::unhook();
+        hookInstalled = false;
+        lastTickId    = 0;
+        currentPhase  = 0;
+        resetStats();
+    }
+    getLogger().info("GoalOptimizer disabled");
+    return true;
+}
+
+} // namespace goal_optimizer
+
+LL_REGISTER_MOD(goal_optimizer::GoalOptimizer, goal_optimizer::GoalOptimizer::getInstance());
